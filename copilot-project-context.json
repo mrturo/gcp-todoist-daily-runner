@@ -1,0 +1,40 @@
+{
+  "projectName": "gcp-todoist-daily-runner",
+  "description": "Daily automation using Google Cloud Run and the Todoist API to manage recurring tasks.",
+  "mainTechnologies": [
+    "Python",
+    "Google Cloud Run",
+    "API Todoist",
+    "Docker"
+  ],
+  "structure": {
+    "src/": "Main source code.",
+    "tests/": "Unit and integration tests.",
+    "Dockerfile": "Container for deployment on Cloud Run.",
+    "requirements.txt": "Production dependencies.",
+    "requirements-dev.txt": "Development and testing dependencies.",
+    "envtool.sh": "Environment tools and development utilities."
+  },
+  "instructions": [
+    "Follow Python best practices (PEP8).",
+    "Avoid common pylint warnings such as C0114, C0115, C0116, and C0301 (maximum 100 characters per line).",
+    "Apply DRY, SOLID, Clean Code, and DDD principles.",
+    "Implement design patterns when appropriate (Factory, Strategy, Adapter, Command, etc.).",
+    "Keep the code modular, scalable, secure, and efficient.",
+    "Centralize configuration and avoid hardcoded parameters.",
+    "Document all modules, classes, and functions with detailed docstrings.",
+    "All code object names (classes, variables, functions, methods, files, etc.), code comments, console logs, and docstrings must be in English, both in code files (.py, .sh, etc.), as well as in README, Dockerfile, and any other type of project file.",
+    "Use PascalCase for classes, snake_case for functions, methods, and variables, and UPPER_SNAKE_CASE for constants.",
+    "Do not access protected members or use dependencies not specified in requirements.txt or requirements-dev.txt. If you need a new one, you must include it in the corresponding file.",
+    "The code must be directly executable, complete, and functional.",
+    "Prioritize computational and memory efficiency (vectorization, float32, category, joblib, etc.).",
+    "Maintain high test coverage and write unit/integration tests with pytest, unittest, mock, pytest-asyncio, or Testcontainers.",
+    "Avoid direct use of assert; explicitly raise AssertionError.",
+    "Use environment variables for credentials and sensitive configurations.",
+    "The code must be idempotent and safe for daily automatic executions.",
+    "Professional, technical, and direct communication; without embellishments or unnecessary explanations.",
+    "Correct clearly and challenge assumptions to foster learning.",
+    "Request clarifications only when necessary for accuracy or precision.",
+    "In step-by-step processes, deliver one step per message and wait for confirmation before proceeding."
+  ]
+}
