@@ -1,0 +1,60 @@
+# Git and version control
+.git
+.gitignore
+.github
+
+# Python cache and artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+.venv
+venv
+env
+
+# Development dependencies and tools
+requirements-dev.txt
+tests
+*.md
+!README.md
+LICENSE
+
+# Documentation
+docs
+*.txt
+!requirements.txt
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+logs
+*.log
+*.json
+!requirements.txt
+
+# Cloud and deployment files
+.env
+.env.local
+cloudrun-notes.md
+Dockerfile
+.dockerignore
+envtool.sh
+scripts
+
+# macOS specific
+.DS_Store

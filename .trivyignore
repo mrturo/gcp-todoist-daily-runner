@@ -1,0 +1,31 @@
+# .trivyignore - Vulnerability filtering for gcp-todoist-runner
+#
+# Alpine Linux (musl libc) has significantly fewer CVEs than Debian (glibc)
+# This project uses python:3.11-alpine as base image which resolves most
+# common vulnerabilities found in debian-based images.
+#
+# Deployment Context:
+# - Platform: Google Cloud Run (stateless, ephemeral containers)
+# - Base Image: python:3.11-alpine (musl libc, minimal attack surface)
+# - Runtime: Python 3.11 FastAPI service
+# - User: Non-root (appuser, UID 1000)
+# - Network: Outbound only (Todoist API calls)
+#
+# Current status: 3 excluded CVEs (vendored dependencies in setuptools, no impacto en runtime)
+#
+# Alpine advantages over Debian:
+# - Smaller image size (~50MB vs ~150MB)
+# - Fewer packages installed by default
+# - musl libc has fewer published CVEs than glibc
+# - Minimal attack surface
+
+
+# Los siguientes CVEs son reportados por Trivy únicamente porque setuptools incluye versiones vulnerables en su carpeta _vendor.
+# No afectan la seguridad real del entorno, ya que la app usa las versiones seguras instaladas globalmente.
+# Mientras setuptools no actualice sus vendors, estos falsos positivos aparecerán siempre.
+#
+# Documentado en SECURITY.md y README.
+
+CVE-2026-23949 # jaraco.context (setuptools/_vendor)
+CVE-2026-0994  # protobuf (setuptools/_vendor)
+CVE-2026-24049 # wheel (setuptools/_vendor)

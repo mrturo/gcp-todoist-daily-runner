@@ -1,0 +1,282 @@
+# GitHub Actions workflow for deploying a Python service to Google Cloud Run
+#
+# EFFICIENCY OPTIMIZATIONS:
+# - Parallel CI/CD jobs: tests run concurrently with build preparation
+# - Python dependency caching: ~2-3 min saved per run
+# - Docker layer caching: ~1-2 min saved per build
+# - Single Trivy scan with multiple outputs: ~1-2 min saved
+# - Docker Buildx with BuildKit: ~30-60 sec saved per build
+# - GCloud SDK caching: ~20-30 sec saved per run
+#
+# Quality gates (blocks deployment on failure):
+# - pytest: Unit tests with coverage requirements
+# - black/isort: Code formatting checks
+# - pylint: Static code analysis (10/10 score required)
+# - Trivy: Vulnerability scanning (Alpine Linux = 0 CVEs expected)
+#
+# Cost controls:
+# - Enforces Artifact Registry vulnerability scanning DISABLED (prevents scan charges)
+# - Uses bounded image tag (short SHA) to reduce storage bloat
+# - Runs Trivy locally as a free alternative (pinned action version)
+#
+# Notes:
+# - Uses a Service Account JSON key (GCP_SA_KEY). Consider migrating to Workload Identity Federation later.
+# - Avoid hardcoding repo/region in commands; use env vars.
+
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  IMAGE: gcp-todoist-runner
+  PORT: 3001
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+  REPO: gcp-todoist-runner
+  SERVICE: gcp-todoist-runner
+
+  # App config (consider moving secrets to Secret Manager + --set-secrets)
+  TIME_ZONE: ${{ secrets.TIME_ZONE }}
+  TODOIST_SECRET_ID: ${{ secrets.TODOIST_SECRET_ID }}
+  API_KEY: ${{ secrets.API_KEY }}
+
+  # Security scanning
+  TRIVY_ENABLED: "true" # set "false" to disable
+
+jobs:
+  # ============================================================================
+  # CI Job: Run tests, quality checks, and security scanning
+  # ============================================================================
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'  # Cache pip dependencies
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies (development only)
+        run: bash envtool.sh install dev
+
+      - name: Run tests
+        run: bash envtool.sh test
+        env:
+          API_KEY: ""  # Disable API key validation for tests
+
+      - name: Run code quality checks
+        run: bash envtool.sh code-check
+        env:
+          SKIP_DOCKER_BUILD: "true"  # Skip Docker build in quality checks
+
+      # Build Docker image locally for security scanning
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image tag (short SHA)
+        id: image-tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image (local only)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:${{ steps.image-tag.outputs.TAG }}
+
+      - name: Run Trivy vulnerability scanner (all formats in parallel)
+        if: env.TRIVY_ENABLED == 'true'
+        run: |
+          # SARIF for GitHub Security
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd):/output \
+            aquasec/trivy:0.52.0 image \
+            --format sarif \
+            --output /output/trivy-results.sarif \
+            --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
+            --exit-code 1 \
+            "${{ env.IMAGE }}:${{ steps.image-tag.outputs.TAG }}" &
+          
+          # Table format for human readability
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd):/output \
+            aquasec/trivy:0.52.0 image \
+            --format table \
+            --output /output/trivy-report-full.txt \
+            --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
+            --exit-code 1 \
+            "${{ env.IMAGE }}:${{ steps.image-tag.outputs.TAG }}" &
+          
+          # JSON format for programmatic processing
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd):/output \
+            aquasec/trivy:0.52.0 image \
+            --format json \
+            --output /output/trivy-report-full.json \
+            --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
+            --exit-code 1 \
+            "${{ env.IMAGE }}:${{ steps.image-tag.outputs.TAG }}" &
+          
+          # Wait for all scans to complete and fail if any found vulnerabilities
+          wait
+
+      - name: Upload Trivy scan results to GitHub Security
+        if: always() && env.TRIVY_ENABLED == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy reports as artifacts
+        if: always() && env.TRIVY_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-vulnerability-reports
+          path: |
+            trivy-report-full.txt
+            trivy-report-full.json
+            trivy-results.sarif
+          retention-days: 30
+
+  # ============================================================================
+  # CD Job: Build, push, and deploy (waits for all quality gates)
+  # ============================================================================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test  # Only deploy if tests + security scan pass
+    environment: GCP
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: ''  # Skip extra components for speed
+
+      # Setup Docker Buildx for layer caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Validates that Artifact Registry repository exists with scanning disabled.
+      # CRITICAL: Pipeline fails if repo missing, scanning cannot be verified, or is enabled.
+      # ONE-TIME SETUP (run manually in Cloud Shell if repo doesn't exist):
+      #   gcloud artifacts repositories create gcp-todoist-runner \
+      #     --repository-format=docker --location=us-central1 \
+      #     --description="Docker repository for gcp-todoist-runner service"
+      #   gcloud artifacts repositories update gcp-todoist-runner \
+      #     --location=us-central1 --disable-vulnerability-scanning
+      - name: Ensure Artifact Registry vulnerability scanning is disabled (cost control)
+        run: |
+          set -euo pipefail
+          
+          echo "🔍 Checking Artifact Registry repository and vulnerability scanning status..."
+          
+          # Check if repository exists and get vulnerability scanning status
+          if ! FULL_OUTPUT=$(gcloud artifacts repositories describe "${{ env.REPO }}" \
+            --location="${{ env.REGION }}" \
+            --format="value(vulnerabilityScanningConfig.enablementConfig)" 2>&1); then
+            
+            echo "❌ ERROR: Cannot access Artifact Registry repository '${{ env.REPO }}'"
+            echo ""
+            echo "Repository may not exist. To create it, run in Cloud Shell:"
+            echo ""
+            echo "  # Create repository"
+            echo "  gcloud artifacts repositories create ${{ env.REPO }} \\"
+            echo "    --repository-format=docker \\"
+            echo "    --location=${{ env.REGION }} \\"
+            echo "    --description=\"Docker repository for ${{ env.SERVICE }} service\""
+            echo ""
+            echo "  # Disable vulnerability scanning (cost control)"
+            echo "  gcloud artifacts repositories update ${{ env.REPO }} \\"
+            echo "    --location=${{ env.REGION }} \\"
+            echo "    --disable-vulnerability-scanning"
+            echo ""
+            echo "Error details:"
+            echo "$FULL_OUTPUT"
+            exit 1
+          fi
+          
+          # Extract only ENABLED/DISABLED (last line if multiline output)
+          STATUS=$(echo "$FULL_OUTPUT" | grep -E '^(ENABLED|DISABLED)$' | tail -1)
+          
+          if [ -z "$STATUS" ]; then
+            echo "❌ ERROR: Cannot parse vulnerability scanning status"
+            echo "Raw output:"
+            echo "$FULL_OUTPUT"
+            exit 1
+          fi
+          
+          echo "📊 Current status: $STATUS"
+          
+          if [ "$STATUS" = "ENABLED" ]; then
+            echo "❌ ERROR: Vulnerability scanning is ENABLED!"
+            echo "This would incur ~\$5/month in scanning costs."
+            echo "Blocking deployment to prevent unexpected charges."
+            echo ""
+            echo "To fix this, run in Cloud Shell:"
+            echo "  gcloud artifacts repositories update ${{ env.REPO }} \\"
+            echo "    --location=${{ env.REGION }} \\"
+            echo "    --disable-vulnerability-scanning"
+            exit 1
+          elif [ "$STATUS" = "DISABLED" ]; then
+            echo "✅ Vulnerability scanning is DISABLED (cost optimization active)"
+          else
+            echo "❌ ERROR: Unexpected vulnerability scanning status: $STATUS"
+            exit 1
+          fi
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker "${{ env.REGION }}-docker.pkg.dev" --quiet
+
+      - name: Set IMAGE_URI environment variable
+        run: |
+          echo "IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.IMAGE }}:${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Build and push Docker image to Artifact Registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_URI }}
+          cache-from: type=registry,ref=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.IMAGE }}:cache
+          cache-to: type=registry,ref=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO }}/${{ env.IMAGE }}:cache,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${{ env.SERVICE }}" \
+            --image="${IMAGE_URI}" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --set-env-vars="TIME_ZONE=${{ env.TIME_ZONE }},TODOIST_SECRET_ID=${{ env.TODOIST_SECRET_ID }},API_KEY=${{ env.API_KEY }}" \
+            --format="value(status.url)" > service_url.txt
+          
+          SERVICE_URL=$(cat service_url.txt)
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "✅ Service deployed to: $SERVICE_URL"

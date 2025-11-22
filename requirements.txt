@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+google-cloud-secret-manager
+todoist-api-python
+httpx
+python-dotenv
+python-dateutil
+pyasn1>=0.6.2
+jaraco.context>=6.1.0
+protobuf<6
+wheel>=0.46.2
